@@ -1,5 +1,5 @@
 [project]
-name = "ComfyUI-MSST-WebUI"
+name = "comfyui-msst-webui"
 description = "MSST WebUI audio source separation nodes for ComfyUI (vocal/instrumental split, multi-stem, denoise, dereverb, karaoke)"
 version = "1.0.0"
 license = { text = "AGPL-3.0" }
@@ -18,5 +18,5 @@ Repository = "https://github.com/Wang-Huachen/ComfyUI-MSST-WebUI"
 
 [tool.comfy]
 DisplayName = "MSST WebUI Audio Separation"
-PublisherId = "Wang-Huachen"
+PublisherId = "wanghuachen"
 Icon = ""
