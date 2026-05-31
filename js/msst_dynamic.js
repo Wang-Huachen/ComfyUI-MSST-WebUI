@@ -2,8 +2,23 @@
 (function() {
     "use strict";
 
+    // 动态获取扩展路径，兼容 Manager 安装（全小写 comfyui-msst-webui）
+    // 和 git clone 安装（原大小写 ComfyUI-MSST-WebUI）
+    function _getExtensionPath() {
+        var scripts = document.getElementsByTagName("script");
+        for (var i = 0; i < scripts.length; i++) {
+            var src = scripts[i].src || "";
+            var m = src.match(/\/extensions\/([^/]+)\//);
+            if (m && m[1].toLowerCase().indexOf("msst") >= 0) {
+                return "/extensions/" + m[1];
+            }
+        }
+        // fallback
+        return "/extensions/ComfyUI-MSST-WebUI";
+    }
+
     var MSST_NODE_NAMES = ["MSSTSeparate", "UVRSeparate"];
-    var MODEL_DATA_URL = "/extensions/ComfyUI-MSST-WebUI/model_data.json";
+    var MODEL_DATA_URL = _getExtensionPath() + "/model_data.json";
     var modelData = null;
 
     // ── 触发重绘 ──
