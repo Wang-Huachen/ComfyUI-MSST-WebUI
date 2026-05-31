@@ -1,0 +1,7 @@
+"""ComfyUI-MSST-WebUI: MSST WebUI 音频源分离节点"""
+from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+
+# ComfyUI 前端静态文件目录（JS 扩展）
+WEB_DIRECTORY = "./js"
