@@ -40,7 +40,7 @@ def refresh() -> bool:
         data = _call_list_models()
         _cache = data
 
-        # 写入 JS 数据文件
+        # 写入 JS 数据文件（前端 fetch 使用）
         all_data = {}
         for m in data.get("MSST", []) + data.get("VR", []):
             all_data[m["display_name"]] = {

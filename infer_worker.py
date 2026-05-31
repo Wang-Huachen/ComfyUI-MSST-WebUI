@@ -157,7 +157,7 @@ def main():
             run_separation(args)
     except Exception as e:
         if args.action == "list_models":
-            print(json.dumps({"error": f"{type(e).__name__}: {str(e)}"}), file=sys.stderr)
+            print(json.dumps({"error": f"{type(e).__name__}: {str(e)}"}))
         else:
             with open(os.path.join(args.output_dir, "error.txt"), "w", encoding="utf-8") as f:
                 f.write(f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}")

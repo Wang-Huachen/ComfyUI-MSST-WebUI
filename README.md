@@ -9,7 +9,7 @@
 | 节点 | 说明 |
 |---|---|
 | **MSST Load Audio** | 加载音频文件，输出 AUDIO + 文件夹路径 + 文件名 |
-| **MSST Audio Separate** | MSST 模型音频分离（vocal_models / multi_stem_models / single_stem_models） |
+| **MSST Audio Separate** | MSST 模型音频分离，输出端口数量和名称根据所选模型动态变化 |
 | **UVR Audio Separate** | UVR/VR 模型音频分离 |
 | **MSST Save Audio** | 保存音频到指定路径 |
 
@@ -43,12 +43,22 @@ git clone <仓库地址> ComfyUI-MSST-WebUI
 1. 添加 **MSST Load Audio** 节点，填入音频文件路径
 2. 添加 **MSST Audio Separate** 节点：
    - `audio` → 连接 Load Audio 的 `audio` 输出
-   - `model_category` → 选择模型类型
-   - `model_name` → 自动筛选出对应类型的可用模型
+   - `model_category` → 选择模型分类（vocal_models / multi_stem_models / single_stem_models）
+   - `model_name` → 自动按分类筛选可用模型
    - `base_filename` → 连接 Load Audio 的 `filename` 输出
-3. 每个输出端口旁会显示音轨名（如 `vocals`、`instrumental`），连接需要的音轨到 **MSST Save Audio**
+3. 输出端口会根据所选模型动态显示音轨名（如 `vocals`、`drums`、`bass`），连接需要的音轨到 **MSST Save Audio**
 4. 将分离节点的 `xxx_fn` 输出连接到 Save Audio 的 `filename` 输入
 5. 设置 Save Audio 的 `folder_path` 和 `format`，运行
+
+### 动态输出端口
+
+MSST Audio Separate 和 UVR Audio Separate 节点的输出端口数量和名称会根据所选模型自动变化：
+
+- 选择 2 轨模型时，显示 2 对输出（如 `vocals` / `other`）
+- 选择 4 轨模型时，显示 4 对输出（如 `drums` / `bass` / `other` / `vocals`）
+- 选择 6 轨模型时，显示 6 对输出（如 `kick` / `snare` / `toms` / `hh` / `ride` / `crash`）
+
+每个输出端口旁直接显示实际音轨名称。输出端口结构：`model_info`（元信息 JSON）+ N 对 `AUDIO` / `STRING`。
 
 ### 串联推理（级联）
 
@@ -56,20 +66,16 @@ git clone <仓库地址> ComfyUI-MSST-WebUI
 
 ```
 MSLoadAudio → MSSTSeparate(vocal_models)
-    ├── stem_0 (vocals) → MSSTSeparate(single_stem_models, dereverb)
-    │                         └── stem_0 (noreverb) → MSSaveAudio
-    └── stem_1 (instrumental) → MSSaveAudio
+    ├── vocals → MSSTSeparate(single_stem_models, dereverb)
+    │              └── noreverb → MSSaveAudio
+    └── other → MSSaveAudio
 ```
 
 串联时：将上一级的 `xxx_fn` 输出连接到下一级的 `base_filename` 输入，文件名会自动累加（如 `song` → `song_vocals` → `song_vocals_noreverb`）。
 
 ### UVR 模型分离
 
-添加 **UVR Audio Separate** 节点，选择 VR 模型即可。
-
-## 示例工作流
-
-`examples/msst-audio-separate-example.json` — 包含加载/分离/级联/保存的完整流程。
+添加 **UVR Audio Separate** 节点，选择 VR 模型即可。输出端口同样显示实际音轨名。
 
 ## 文件命名规则
 
@@ -82,6 +88,5 @@ MSLoadAudio → MSSTSeparate(vocal_models)
 - 需要 MSST WebUI 便携包（含 workenv Python 环境）
 - 首次使用请确保 `config.json` 中 `msst_root` 路径正确
 - 推理使用 MSST 便携包自带的 Python 环境，与 ComfyUI 环境完全隔离
-- 模型列表和音轨名称通过 MSST Python 子进程动态发现，确保准确
-- 输出端口旁绘制的蓝色文字标明每个端口的实际音轨名
+- 模型列表通过 MSST Python 子进程动态发现，确保准确
 - VRAM 有限的用户建议使用 `device=cpu`

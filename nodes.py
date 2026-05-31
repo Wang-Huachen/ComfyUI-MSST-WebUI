@@ -52,7 +52,6 @@ def _get_msst_ffmpeg() -> str:
 
 def _save_mp3_with_msst_ffmpeg(audio_np, sr: int, output_path: str):
     """使用 MSST 自带的 ffmpeg 编码 MP3（参考 MSST save_audio 实现）"""
-    import subprocess
     ffmpeg = _get_msst_ffmpeg()
     channels = audio_np.shape[1] if audio_np.ndim > 1 else 1
     subprocess.run(
@@ -90,21 +89,19 @@ class MSSTSeparate:
             }
         }
 
-    RETURN_TYPES = tuple(
-        ["AUDIO", "STRING"] * MAX_STEMS + ["STRING"]
+    RETURN_TYPES = ("STRING",) + tuple(
+        ["AUDIO", "STRING"] * MAX_STEMS
     )
-    # 交错排列: AUDIO, STRING, AUDIO, STRING, ...
-    _names = []
+    # 输出顺序: model_info (STRING), 然后 MAX_STEMS 对 (AUDIO, STRING)
+    _names = ["model_info"]
     for i in range(MAX_STEMS):
         _names.append(f"stem_{i}")
         _names.append(f"stem_{i}_fn")
-    _names.append("model_info")
     RETURN_NAMES = tuple(_names)
-    _tips = []
+    _tips = ["模型元信息 JSON"]
     for i in range(MAX_STEMS):
         _tips.append(f"第 {i+1} 轨音频")
         _tips.append(f"第 {i+1} 轨文件名")
-    _tips.append("模型元信息 JSON")
     OUTPUT_TOOLTIPS = tuple(_tips)
     FUNCTION = "separate"
     CATEGORY = "audio/separation"
@@ -179,7 +176,17 @@ class MSSTSeparate:
 
             # 4. 按 instruments 顺序排列输出
             stem_names = [s for s in instruments if s in manifest]
-            outputs = []
+
+            # model_info JSON 放在索引 0（固定位置，前端动态调整 stem pairs 时不动）
+            info_json = json.dumps({
+                "model_name": model_name,
+                "instruments": stem_names,
+                "stem_map": {s: i for i, s in enumerate(stem_names)},
+                "model_class": model_info.get("model_class", "MSST"),
+            }, ensure_ascii=False)
+            outputs = [info_json]
+
+            # stem pairs 从索引 1 开始
             for i in range(MAX_STEMS):
                 if i < len(stem_names):
                     stem = stem_names[i]
@@ -191,15 +198,6 @@ class MSSTSeparate:
                     fn_str = ""
                 outputs.append(audio_dict)
                 outputs.append(fn_str)
-
-            # model_info JSON
-            info_json = json.dumps({
-                "model_name": model_name,
-                "instruments": stem_names,
-                "stem_map": {s: i for i, s in enumerate(stem_names)},
-                "model_class": model_info.get("model_class", "MSST"),
-            }, ensure_ascii=False)
-            outputs.append(info_json)
 
             return tuple(outputs)
 
@@ -225,9 +223,9 @@ class UVRSeparate:
             }
         }
 
-    RETURN_TYPES = ("AUDIO", "STRING", "AUDIO", "STRING", "STRING")
-    RETURN_NAMES = ("stem_0", "stem_0_fn", "stem_1", "stem_1_fn", "model_info")
-    OUTPUT_TOOLTIPS = ("主音轨音频", "主音轨文件名", "次音轨音频", "次音轨文件名", "模型元信息 JSON")
+    RETURN_TYPES = ("STRING", "AUDIO", "STRING", "AUDIO", "STRING")
+    RETURN_NAMES = ("model_info", "stem_0", "stem_0_fn", "stem_1", "stem_1_fn")
+    OUTPUT_TOOLTIPS = ("模型元信息 JSON", "主音轨音频", "主音轨文件名", "次音轨音频", "次音轨文件名")
     FUNCTION = "separate"
     CATEGORY = "audio/separation"
 
@@ -292,11 +290,11 @@ class UVRSeparate:
             }, ensure_ascii=False)
 
             return (
+                info_json,
                 stem_map.get("stem_0", (create_silent_audio(sr), ""))[0],
                 stem_map.get("stem_0", (create_silent_audio(sr), ""))[1],
                 stem_map.get("stem_1", (create_silent_audio(sr), ""))[0],
                 stem_map.get("stem_1", (create_silent_audio(sr), ""))[1],
-                info_json,
             )
 
         finally:

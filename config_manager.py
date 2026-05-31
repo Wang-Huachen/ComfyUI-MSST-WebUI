@@ -80,9 +80,10 @@ def get_python_exe() -> str:
             exe = c
             break
 
-    if not os.path.isfile(exe):
+    if exe is None or not os.path.isfile(exe):
+        searched = "\n  ".join(candidates)
         raise RuntimeError(
-            f"Python 解释器未找到: {exe}\n"
+            f"Python 解释器未找到，已搜索:\n  {searched}\n"
             "请检查 config.json 中的 python_env 设置，\n"
             "或确认 MSST 便携包中自带了 workenv 环境。"
         )
