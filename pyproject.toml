@@ -1,0 +1,22 @@
+[project]
+name = "ComfyUI-MSST-WebUI"
+description = "MSST WebUI audio source separation nodes for ComfyUI (vocal/instrumental split, multi-stem, denoise, dereverb, karaoke)"
+version = "1.0.0"
+license = { text = "AGPL-3.0" }
+readme = "README.md"
+authors = [
+    { name = "Wang-Huachen", email = "oisun@qq.com" },
+]
+
+requires-python = ">=3.10"
+dependencies = [
+    "soundfile>=0.12.1",
+]
+
+[project.urls]
+Repository = "https://github.com/Wang-Huachen/ComfyUI-MSST-WebUI"
+
+[tool.comfy]
+DisplayName = "MSST WebUI Audio Separation"
+PublisherId = "Wang-Huachen"
+Icon = ""
