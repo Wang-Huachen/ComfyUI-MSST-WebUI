@@ -1,9 +1,12 @@
-"""ComfyUI 节点定义：MSSTSeparate、UVRSeparate、MSSaveAudio"""
+"""ComfyUI 节点定义：MSSTSeparate、UVRSeparate、MSSaveAudio (V3 API)"""
 import json
 import os
 import subprocess
 import tempfile
 import logging
+from typing_extensions import override
+
+from comfy_api.latest import ComfyExtension, io
 
 logger = logging.getLogger("ComfyUI-MSST-WebUI")
 
@@ -29,7 +32,6 @@ def _ensure_model_data():
             _ALL_VR_NAMES.extend(model_registry.get_vr_display_names())
         except Exception as e:
             logger.warning(f"模型数据加载失败（节点将显示空列表）: {e}")
-            # 提供一个占位消息，让用户知道需要配置
             if not _ALL_MSST_NAMES:
                 _ALL_MSST_NAMES.append("-- 请先配置 config.json --")
 
@@ -44,7 +46,6 @@ def _get_msst_ffmpeg() -> str:
         candidate = os.path.join(msst_root, "ffmpeg", "ffmpeg.exe")
         if os.path.isfile(candidate):
             return candidate
-        # 回退到系统 ffmpeg
         return "ffmpeg"
     except Exception:
         return "ffmpeg"
@@ -67,264 +68,197 @@ def _save_mp3_with_msst_ffmpeg(audio_np, sr: int, output_path: str):
     )
 
 
+def _run_separation(audio, model_name, model_info, device, base_filename, instruments):
+    """执行 MSST/UVR 子进程分离并处理结果"""
+    tmp_dir = tempfile.mkdtemp(prefix="msst_")
+    try:
+        input_wav = os.path.join(tmp_dir, "input.wav")
+        sr = audio_to_temp_wav(audio, input_wav)
+
+        worker = os.path.join(os.path.dirname(__file__), "infer_worker.py")
+        python_exe = get_python_exe()
+        msst_root = get_msst_root()
+
+        cmd = [
+            python_exe, worker,
+            "--model_class", model_info.get("model_class", "MSST"),
+            "--model_type", model_info.get("model_type", ""),
+            "--config_path", model_info.get("config_path", ""),
+            "--model_path", model_info["model_path"],
+            "--input_wav", input_wav,
+            "--output_dir", tmp_dir,
+            "--device", device,
+            "--msst_root", msst_root,
+        ]
+
+        result = subprocess.run(
+            cmd,
+            cwd=msst_root,
+            capture_output=True, text=True, timeout=600,
+        )
+
+        error_file = os.path.join(tmp_dir, "error.txt")
+        if os.path.exists(error_file):
+            with open(error_file, "r", encoding="utf-8") as f:
+                raise RuntimeError(f"MSST 推理失败:\n{f.read()}")
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"MSST 子进程异常退出 (code={result.returncode}):\n"
+                f"stdout: {result.stdout[:500]}\n"
+                f"stderr: {result.stderr[:500]}"
+            )
+
+        manifest_path = os.path.join(tmp_dir, "manifest.json")
+        if not os.path.exists(manifest_path):
+            raise RuntimeError("子进程未生成 manifest.json")
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        stem_names = [s for s in instruments if s in manifest]
+
+        info_json = json.dumps({
+            "model_name": model_name,
+            "instruments": stem_names,
+            "stem_map": {s: i for i, s in enumerate(stem_names)},
+            "model_class": model_info.get("model_class", "MSST"),
+        }, ensure_ascii=False)
+        outputs = [info_json]
+
+        for i in range(MAX_STEMS):
+            if i < len(stem_names):
+                stem = stem_names[i]
+                wav_path = os.path.join(tmp_dir, manifest[stem])
+                audio_dict = read_wav_to_audio(wav_path)
+                fn_str = f"{base_filename}_{stem}"
+            else:
+                audio_dict = create_silent_audio(sr)
+                fn_str = ""
+            outputs.append(audio_dict)
+            outputs.append(fn_str)
+
+        return outputs, sr
+
+    finally:
+        cleanup_temp_dir(tmp_dir)
+
+
 # ═══════════════════════════════════════════════
 # 节点 1: MSSTSeparate
 # ═══════════════════════════════════════════════
-class MSSTSeparate:
+class MSSTSeparate(io.ComfyNode):
     """MSST 音频分离节点（支持 vocal_models / multi_stem_models / single_stem_models）"""
 
     @classmethod
-    def INPUT_TYPES(cls):
+    def define_schema(cls):
         _ensure_model_data()
-        return {
-            "required": {
-                "audio": ("AUDIO",),
-                "model_category": (
-                    ["vocal_models", "multi_stem_models", "single_stem_models"],
-                    {"default": "vocal_models"},
-                ),
-                "model_name": (_ALL_MSST_NAMES,),
-                "device": (["auto", "cuda", "cpu"], {"default": "auto"}),
-                "base_filename": ("STRING", {"default": "audio", "multiline": False}),
-            }
-        }
+        # 输出交错排列: model_info, stem_0(AUDIO), stem_0_fn(STRING), stem_1(AUDIO), ...
+        _outputs = [io.String.Output("model_info", tooltip="模型元信息 JSON")]
+        for i in range(MAX_STEMS):
+            _outputs.append(io.Audio.Output(f"stem_{i}", tooltip=f"第 {i+1} 轨音频"))
+            _outputs.append(io.String.Output(f"stem_{i}_fn", tooltip=f"第 {i+1} 轨文件名"))
+        return io.Schema(
+            node_id="MSSTSeparate",
+            display_name="MSST Audio Separate",
+            category="audio/separation",
+            inputs=[
+                io.Audio.Input("audio"),
+                io.Combo.Input("model_category",
+                    options=["vocal_models", "multi_stem_models", "single_stem_models"],
+                    default="vocal_models"),
+                io.Combo.Input("model_name",
+                    options=_ALL_MSST_NAMES),
+                io.Combo.Input("device",
+                    options=["auto", "cuda", "cpu"],
+                    default="auto"),
+                io.String.Input("base_filename", default="audio"),
+            ],
+            outputs=_outputs,
+        )
 
-    RETURN_TYPES = ("STRING",) + tuple(
-        ["AUDIO", "STRING"] * MAX_STEMS
-    )
-    # 输出顺序: model_info (STRING), 然后 MAX_STEMS 对 (AUDIO, STRING)
-    _names = ["model_info"]
-    for i in range(MAX_STEMS):
-        _names.append(f"stem_{i}")
-        _names.append(f"stem_{i}_fn")
-    RETURN_NAMES = tuple(_names)
-    _tips = ["模型元信息 JSON"]
-    for i in range(MAX_STEMS):
-        _tips.append(f"第 {i+1} 轨音频")
-        _tips.append(f"第 {i+1} 轨文件名")
-    OUTPUT_TOOLTIPS = tuple(_tips)
-    FUNCTION = "separate"
-    CATEGORY = "audio/separation"
-
-    def separate(self, audio, model_category, model_name, device, base_filename):
-        """执行 MSST 音频分离"""
+    @classmethod
+    def execute(cls, audio, model_category, model_name, device, base_filename):
         model_info = model_registry.get_model_info(model_name)
         if not model_info:
             raise ValueError(f"未知模型: {model_name}")
-
         instruments = model_info.get("instruments", ["vocals", "instrumental"])
-        return self._run_separation(
-            audio=audio,
-            model_name=model_name,
-            model_info=model_info,
-            device=device,
-            base_filename=base_filename,
-            instruments=instruments,
+        outputs, _ = _run_separation(
+            audio=audio, model_name=model_name, model_info=model_info,
+            device=device, base_filename=base_filename, instruments=instruments,
         )
-
-    def _run_separation(self, audio, model_name, model_info, device, base_filename, instruments):
-        """运行子进程进行分离并处理结果"""
-        tmp_dir = tempfile.mkdtemp(prefix="msst_")
-        try:
-            # 1. 写临时 WAV
-            input_wav = os.path.join(tmp_dir, "input.wav")
-            sr = audio_to_temp_wav(audio, input_wav)
-
-            # 2. 调用 MSST 子进程
-            worker = os.path.join(os.path.dirname(__file__), "infer_worker.py")
-            python_exe = get_python_exe()
-            msst_root = get_msst_root()
-
-            cmd = [
-                python_exe, worker,
-                "--model_class", model_info.get("model_class", "MSST"),
-                "--model_type", model_info.get("model_type", ""),
-                "--config_path", model_info.get("config_path", ""),
-                "--model_path", model_info["model_path"],
-                "--input_wav", input_wav,
-                "--output_dir", tmp_dir,
-                "--device", device,
-                "--msst_root", msst_root,
-            ]
-
-            result = subprocess.run(
-                cmd,
-                cwd=msst_root,
-                capture_output=True, text=True, timeout=600,
-            )
-
-            # 检查错误
-            error_file = os.path.join(tmp_dir, "error.txt")
-            if os.path.exists(error_file):
-                with open(error_file, "r", encoding="utf-8") as f:
-                    err_msg = f.read()
-                raise RuntimeError(f"MSST 推理失败:\n{err_msg}")
-
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"MSST 子进程异常退出 (code={result.returncode}):\n"
-                    f"stdout: {result.stdout[:500]}\n"
-                    f"stderr: {result.stderr[:500]}"
-                )
-
-            # 3. 读取结果清单
-            manifest_path = os.path.join(tmp_dir, "manifest.json")
-            if not os.path.exists(manifest_path):
-                raise RuntimeError("子进程未生成 manifest.json")
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-
-            # 4. 按 instruments 顺序排列输出
-            stem_names = [s for s in instruments if s in manifest]
-
-            # model_info JSON 放在索引 0（固定位置，前端动态调整 stem pairs 时不动）
-            info_json = json.dumps({
-                "model_name": model_name,
-                "instruments": stem_names,
-                "stem_map": {s: i for i, s in enumerate(stem_names)},
-                "model_class": model_info.get("model_class", "MSST"),
-            }, ensure_ascii=False)
-            outputs = [info_json]
-
-            # stem pairs 从索引 1 开始
-            for i in range(MAX_STEMS):
-                if i < len(stem_names):
-                    stem = stem_names[i]
-                    wav_path = os.path.join(tmp_dir, manifest[stem])
-                    audio_dict = read_wav_to_audio(wav_path)
-                    fn_str = f"{base_filename}_{stem}"
-                else:
-                    audio_dict = create_silent_audio(sr)
-                    fn_str = ""
-                outputs.append(audio_dict)
-                outputs.append(fn_str)
-
-            return tuple(outputs)
-
-        finally:
-            cleanup_temp_dir(tmp_dir)
+        return io.NodeOutput(*outputs)
 
 
 # ═══════════════════════════════════════════════
 # 节点 2: UVRSeparate
 # ═══════════════════════════════════════════════
-class UVRSeparate:
+class UVRSeparate(io.ComfyNode):
     """UVR/VR 音频分离节点"""
 
     @classmethod
-    def INPUT_TYPES(cls):
+    def define_schema(cls):
         _ensure_model_data()
-        return {
-            "required": {
-                "audio": ("AUDIO",),
-                "model_name": (_ALL_VR_NAMES,),
-                "device": (["auto", "cuda", "cpu"], {"default": "auto"}),
-                "base_filename": ("STRING", {"default": "audio", "multiline": False}),
-            }
-        }
+        return io.Schema(
+            node_id="UVRSeparate",
+            display_name="UVR Audio Separate",
+            category="audio/separation",
+            inputs=[
+                io.Audio.Input("audio"),
+                io.Combo.Input("model_name",
+                    options=_ALL_VR_NAMES),
+                io.Combo.Input("device",
+                    options=["auto", "cuda", "cpu"],
+                    default="auto"),
+                io.String.Input("base_filename", default="audio"),
+            ],
+            outputs=[
+                io.String.Output("model_info", tooltip="模型元信息 JSON"),
+                io.Audio.Output("stem_0", tooltip="主音轨音频"),
+                io.String.Output("stem_0_fn", tooltip="主音轨文件名"),
+                io.Audio.Output("stem_1", tooltip="次音轨音频"),
+                io.String.Output("stem_1_fn", tooltip="次音轨文件名"),
+            ],
+        )
 
-    RETURN_TYPES = ("STRING", "AUDIO", "STRING", "AUDIO", "STRING")
-    RETURN_NAMES = ("model_info", "stem_0", "stem_0_fn", "stem_1", "stem_1_fn")
-    OUTPUT_TOOLTIPS = ("模型元信息 JSON", "主音轨音频", "主音轨文件名", "次音轨音频", "次音轨文件名")
-    FUNCTION = "separate"
-    CATEGORY = "audio/separation"
-
-    def separate(self, audio, model_name, device, base_filename):
+    @classmethod
+    def execute(cls, audio, model_name, device, base_filename):
         model_info = model_registry.get_model_info(model_name)
         if not model_info:
             raise ValueError(f"未知 VR 模型: {model_name}")
-
         instruments = model_info.get("instruments", ["Vocals", "Instrumental"])
-        # VR 模型固定 2 轨
-        tmp_dir = tempfile.mkdtemp(prefix="msst_")
-        try:
-            input_wav = os.path.join(tmp_dir, "input.wav")
-            sr = audio_to_temp_wav(audio, input_wav)
-
-            worker = os.path.join(os.path.dirname(__file__), "infer_worker.py")
-            python_exe = get_python_exe()
-            msst_root = get_msst_root()
-
-            cmd = [
-                python_exe, worker,
-                "--model_class", "VR",
-                "--model_type", "VR",
-                "--config_path", "",
-                "--model_path", model_info["model_path"],
-                "--input_wav", input_wav,
-                "--output_dir", tmp_dir,
-                "--device", device,
-                "--msst_root", msst_root,
-            ]
-            result = subprocess.run(
-                cmd, cwd=msst_root,
-                capture_output=True, text=True, timeout=600,
-            )
-
-            error_file = os.path.join(tmp_dir, "error.txt")
-            if os.path.exists(error_file):
-                with open(error_file, "r", encoding="utf-8") as f:
-                    raise RuntimeError(f"UVR 推理失败:\n{f.read()}")
-            if result.returncode != 0:
-                raise RuntimeError(f"UVR 子进程异常退出: {result.stderr[:500]}")
-
-            manifest_path = os.path.join(tmp_dir, "manifest.json")
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-
-            # 按 instruments 顺序排列
-            stem_map = {}
-            for i, stem in enumerate(instruments):
-                if stem in manifest:
-                    audio_dict = read_wav_to_audio(os.path.join(tmp_dir, manifest[stem]))
-                    fn_str = f"{base_filename}_{stem}"
-                else:
-                    audio_dict = create_silent_audio(sr)
-                    fn_str = ""
-                stem_map[f"stem_{i}"] = (audio_dict, fn_str)
-
-            info_json = json.dumps({
-                "model_name": model_name,
-                "instruments": instruments,
-                "stem_map": {s: i for i, s in enumerate(instruments)},
-            }, ensure_ascii=False)
-
-            return (
-                info_json,
-                stem_map.get("stem_0", (create_silent_audio(sr), ""))[0],
-                stem_map.get("stem_0", (create_silent_audio(sr), ""))[1],
-                stem_map.get("stem_1", (create_silent_audio(sr), ""))[0],
-                stem_map.get("stem_1", (create_silent_audio(sr), ""))[1],
-            )
-
-        finally:
-            cleanup_temp_dir(tmp_dir)
+        outputs, _ = _run_separation(
+            audio=audio, model_name=model_name, model_info=model_info,
+            device=device, base_filename=base_filename, instruments=instruments,
+        )
+        return io.NodeOutput(*outputs)
 
 
 # ═══════════════════════════════════════════════
-# 节点 3: MSLoadAudio — 加载音频文件
+# 节点 3: MSLoadAudio
 # ═══════════════════════════════════════════════
-class MSLoadAudio:
+class MSLoadAudio(io.ComfyNode):
     """加载音频文件，输出 AUDIO + 路径 + 文件名"""
 
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "file_path": ("STRING", {"default": "", "multiline": False}),
-            }
-        }
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MSLoadAudio",
+            display_name="MSST Load Audio",
+            category="audio/separation",
+            inputs=[
+                io.String.Input("file_path", default=""),
+            ],
+            outputs=[
+                io.Audio.Output("audio", tooltip="加载的音频"),
+                io.String.Output("folder_path", tooltip="文件所在文件夹路径"),
+                io.String.Output("filename", tooltip="文件名（不含扩展名）"),
+            ],
+        )
 
-    RETURN_TYPES = ("AUDIO", "STRING", "STRING")
-    RETURN_NAMES = ("audio", "folder_path", "filename")
-    OUTPUT_TOOLTIPS = ("加载的音频", "文件所在文件夹路径", "文件名（不含扩展名）")
-    FUNCTION = "load"
-    CATEGORY = "audio/separation"
-
-    def load(self, file_path):
+    @classmethod
+    def execute(cls, file_path):
         import soundfile as sf
         import torch
-        import os
 
         file_path = file_path.strip().strip('"').strip("'")
         if not file_path or not os.path.isfile(file_path):
@@ -341,34 +275,37 @@ class MSLoadAudio:
         fname = os.path.splitext(os.path.basename(file_path))[0]
 
         audio_dict = {"waveform": tensor, "sample_rate": int(sr)}
-        return (audio_dict, folder, fname)
+        return io.NodeOutput(audio_dict, folder, fname)
 
 
 # ═══════════════════════════════════════════════
 # 节点 4: MSSaveAudio
 # ═══════════════════════════════════════════════
-class MSSaveAudio:
+class MSSaveAudio(io.ComfyNode):
     """保存音频到指定路径"""
 
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "audio": ("AUDIO",),
-                "folder_path": ("STRING", {"default": "", "multiline": False}),
-                "filename": ("STRING", {"default": "audio", "multiline": False}),
-                "format": (["wav", "flac", "mp3"], {"default": "wav"}),
-            }
-        }
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MSSaveAudio",
+            display_name="MSST Save Audio",
+            category="audio/separation",
+            is_output_node=True,
+            inputs=[
+                io.Audio.Input("audio"),
+                io.String.Input("folder_path", default=""),
+                io.String.Input("filename", default="audio"),
+                io.Combo.Input("format",
+                    options=["wav", "flac", "mp3"],
+                    default="wav"),
+            ],
+            outputs=[
+                io.String.Output("filepath", tooltip="文件保存完整路径"),
+            ],
+        )
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("filepath",)
-    OUTPUT_TOOLTIPS = ("文件保存完整路径",)
-    FUNCTION = "save"
-    CATEGORY = "audio/separation"
-    OUTPUT_NODE = True
-
-    def save(self, audio, folder_path, filename, format):
+    @classmethod
+    def execute(cls, audio, folder_path, filename, format):
         import soundfile as sf
         import numpy as np
         import torch
@@ -377,7 +314,7 @@ class MSSaveAudio:
         sr = int(audio["sample_rate"])
         if waveform.dim() == 3:
             waveform = waveform.squeeze(0)
-        audio_np = waveform.cpu().numpy().T  # [S, C]
+        audio_np = waveform.cpu().numpy().T
 
         save_dir = folder_path.strip() if folder_path.strip() else "."
         os.makedirs(save_dir, exist_ok=True)
@@ -387,26 +324,22 @@ class MSSaveAudio:
         if ext == "flac":
             sf.write(save_path, audio_np, sr, subtype="PCM_24")
         elif ext == "mp3":
-            # 使用 MSST 自带的 ffmpeg（位于 msst_root/ffmpeg/bin/ 下）
             _save_mp3_with_msst_ffmpeg(audio_np, sr, save_path)
         else:
             sf.write(save_path, audio_np, sr, subtype="FLOAT")
 
         logger.info(f"音频已保存: {save_path}")
-        return (os.path.abspath(save_path),)
+        return io.NodeOutput(os.path.abspath(save_path))
 
 
-# ── 节点注册映射 ──
-NODE_CLASS_MAPPINGS = {
-    "MSLoadAudio": MSLoadAudio,
-    "MSSTSeparate": MSSTSeparate,
-    "UVRSeparate": UVRSeparate,
-    "MSSaveAudio": MSSaveAudio,
-}
+# ═══════════════════════════════════════════════
+# V3 扩展注册
+# ═══════════════════════════════════════════════
+class MSSTExtension(ComfyExtension):
+    @override
+    async def get_node_list(self) -> list[type[io.ComfyNode]]:
+        return [MSLoadAudio, MSSTSeparate, UVRSeparate, MSSaveAudio]
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "MSLoadAudio": "MSST Load Audio",
-    "MSSTSeparate": "MSST Audio Separate",
-    "UVRSeparate": "UVR Audio Separate",
-    "MSSaveAudio": "MSST Save Audio",
-}
+
+async def comfy_entrypoint() -> MSSTExtension:
+    return MSSTExtension()

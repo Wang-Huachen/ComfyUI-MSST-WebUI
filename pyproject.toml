@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-msst-webui"
 description = "MSST WebUI audio source separation nodes for ComfyUI (vocal/instrumental split, multi-stem, denoise, dereverb, karaoke)"
-version = "1.1.0"
+version = "1.2.0"
 license = { text = "AGPL-3.0" }
 readme = "README.md"
 authors = [
